@@ -7,5 +7,5 @@ export async function trackGKE(req, res) {
     setInterval(async() => {
         await spawnNewNodeIfThresholdExceeded();
     }, 1000 * 60 * 3);
-    return res.success()
+    return res.json({"success": "true"})
 }

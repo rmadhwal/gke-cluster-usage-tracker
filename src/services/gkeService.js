@@ -1,10 +1,13 @@
 import _ from "lodash";
 import monitoring from '@google-cloud/monitoring';
 import container from '@google-cloud/container';
+import {addDocumentWithoutId, createIndex} from "./elasticService";
+
+const indexName = "gke-metric-data";
 
 function pad(n){return n<10 ? '0'+n : n}
-
 export async function spawnNewNodeIfThresholdExceeded() {
+    await createIndex(indexName)
     const projectId = 'qpefcs-course-project';
     const cpuFilter = 'metric.type="kubernetes.io/node/cpu/allocatable_utilization"';
     const client = new monitoring.MetricServiceClient();
@@ -32,6 +35,10 @@ export async function spawnNewNodeIfThresholdExceeded() {
     };
 
     const [cpuTimeSeries] = await client.listTimeSeries(cluster_scaling_request);
+    const cpuMetricInfoToLog = _.map(cpuTimeSeries, function mapToValue(row) {
+        return {"node": row.resource.labels["node_name"], "metric": "cpu utilization", "value": _.first(row.points).value.doubleValue, "@timestamp": _.first(row.points).interval.startTime.seconds};
+    })
+
     const latestCpuUsageMetric = _.map(cpuTimeSeries, function mapToValue(row) {
         return _.first(row.points).value.doubleValue;
     })
@@ -63,6 +70,9 @@ export async function spawnNewNodeIfThresholdExceeded() {
     };
 
     const [memoryTimeSeries] = await client.listTimeSeries(memory_scaling_request);
+    const memoryMetricInfoToLog = _.map(cpuTimeSeries, function mapToValue(row) {
+        return {"node": row.resource.labels["node_name"], "metric": "memory utilization", "value": _.first(row.points).value.doubleValue, "@timestamp": _.first(row.points).interval.startTime.seconds};
+    })
     const latestMemoryUsageMetric = _.map(memoryTimeSeries, function mapToValue(row) {
         return _.first(row.points).value.doubleValue;
     })
@@ -71,6 +81,13 @@ export async function spawnNewNodeIfThresholdExceeded() {
         await clusterManagerClient.setNodePoolSize({nodePoolId: "default-pool", nodeCount: nodesUp + 1, zone: 'us-central1-c', projectId: "qpefcs-course-project", clusterId: "flfk-cluster"})
     }
 
+    _.forEach(cpuMetricInfoToLog, function indexToElasticsearch(cpuInfo) {
+        addDocumentWithoutId(indexName, cpuInfo);
+    })
+
+    _.forEach(memoryMetricInfoToLog, function indexToElasticsearch(memoryInfo) {
+        addDocumentWithoutId(indexName, memoryInfo);
+    })
 }
 
 
