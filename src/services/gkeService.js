@@ -4,7 +4,7 @@ import container from '@google-cloud/container';
 
 function pad(n){return n<10 ? '0'+n : n}
 
-export async function spawnNewNodeIfThresholdExceeded(value, index, self) {
+export async function spawnNewNodeIfThresholdExceeded() {
     const projectId = 'qpefcs-course-project';
     const cpuFilter = 'metric.type="kubernetes.io/node/cpu/allocatable_utilization"';
     const client = new monitoring.MetricServiceClient();
