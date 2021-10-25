@@ -1,5 +1,4 @@
 import _ from "lodash";
-import monitoring from '@google-cloud/monitoring';
 import container from '@google-cloud/container';
 import {addDocumentWithoutId, createIndex} from "./elasticService";
 import k8s from '@kubernetes/client-node';
@@ -7,12 +6,11 @@ import k8s from '@kubernetes/client-node';
 const indexName = "gke-metric-data";
 const availableNodeCpu = 3.5;
 const availableNodeMemory = 13000;
+const thresholdUtilization = 0.8;
 const nodePoolName = "pool-1";
 
-var pending_nodes = 0;
+var pendingNodes = 0;
 let realNodeUsage = {};
-
-const time_to_provision_new_node = 60;
 
 export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
     await createIndex(indexName)
@@ -55,7 +53,7 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
             const jobNode = job.spec.nodeName
             const jobResources = _.first(job.spec.containers).resources.requests
             if (!jobNode in realNodeUsage)
-                pending_nodes = pending_nodes - 1;
+                pendingNodes = pendingNodes - 1;
             currentNodeUsage[jobNode] = {
                 "cpuUsed": (_.get(_.get(initialNodeUsage, "jobNode"), "cpuUsed") || 0) + parseInt(jobResources.cpu),
                 "memoryUsed": (_.get(_.get(initialNodeUsage, "jobNode"), "memoryUsed") || 0) + (parseInt(jobResources.memory.replace(/\D/g, '')) * 1024)
@@ -65,7 +63,7 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
         realNodeUsage = Object.assign({}, currentNodeUsage);
 
         //Populate nodes that are requested/running but have no jobs yet
-        for (let i = 0; i < pending_nodes; i++) {
+        for (let i = 0; i < pendingNodes; i++) {
             currentNodeUsage[i.toString()] = {"cpuUsed": 0, "memoryUsed": 0}
         }
 
@@ -79,33 +77,32 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
             };
         })
 
+        const runningJobCpuSizes = _.map(runningJobs, function (job) {
+            return parseInt(_.first(job.spec.containers).resources.requests.cpu)
+        });
+        const pendingJobCpuSizes = _.map(pendingJobs, function (job) {
+            return parseInt(_.first(job.spec.containers).resources.requests.cpu)
+        });
+        const jobCpuSizes = _.concat(runningJobCpuSizes, pendingJobCpuSizes)
+
+        const jobCpuSizeSum = jobCpuSizes.reduce((a, b) => a + b, 0);
+        const jobCpuSizeAvg = (jobCpuSizeSum / jobCpuSizes.length) || 0;
+
+        const runningJobMemorySizes = _.map(runningJobs, function (job) {
+            return parseInt(_.first(job.spec.containers).resources.requests.memory.replace(/\D/g, '')) * 1024;
+        });
+        const pendingJobMemorySizes = _.map(pendingJobs, function (job) {
+            return parseInt(_.first(job.spec.containers).resources.requests.memory.replace(/\D/g, '')) * 1024;
+        });
+        const jobMemorySizes = _.concat(runningJobMemorySizes, pendingJobMemorySizes);
+
+        const jobMemorySizeSum = jobMemorySizes.reduce((a, b) => a + b, 0);
+        const jobMemorySizeAvg = (jobMemorySizeSum / jobMemorySizes.length) || 0;
+
         //If we have no idea of the service time
         //Ensure we meet threshold capacity
         if (completedJobs.length === 0) {
             if (pendingJobs.length + runningJobs.length > 0) {
-
-                const runningJobCpuSizes = _.map(runningJobs, function (job) {
-                    return parseInt(_.first(job.spec.containers).resources.requests.cpu)
-                });
-                const pendingJobCpuSizes = _.map(pendingJobs, function (job) {
-                    return parseInt(_.first(job.spec.containers).resources.requests.cpu)
-                });
-                const jobCpuSizes = _.concat(runningJobCpuSizes, pendingJobCpuSizes)
-
-                const jobCpuSizeSum = jobCpuSizes.reduce((a, b) => a + b, 0);
-                const jobCpuSizeAvg = (jobCpuSizeSum / jobCpuSizes.length);
-
-                const runningJobMemorySizes = _.map(runningJobs, function (job) {
-                    return parseInt(_.first(job.spec.containers).resources.requests.memory.replace(/\D/g, '')) * 1024;
-                });
-                const pendingJobMemorySizes = _.map(pendingJobs, function (job) {
-                    return parseInt(_.first(job.spec.containers).resources.requests.memory.replace(/\D/g, '')) * 1024;
-                });
-                const jobMemorySizes = _.concat(runningJobMemorySizes, pendingJobMemorySizes);
-
-                const jobMemorySizeSum = jobMemorySizes.reduce((a, b) => a + b, 0);
-                const jobMemorySizeAvg = (jobMemorySizeSum / jobMemorySizes.length);
-
                 const expectedNewJobs = runningJobs.length + pendingJobs.length;
                 const jobsWeCanHandle = _.sum(_.map(currentNodeUsage, function (node) {
                     const jobsThatCanBeHandledCpuThreshold = Math.floor((availableNodeCpu - node["cpuUsed"]) / jobCpuSizeAvg)
@@ -119,17 +116,17 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
                     const jobsPerNodeMemoryThreshold = Math.floor(availableNodeMemory / jobMemorySizeAvg);
                     const jobsPerNode = Math.min(jobsPerNodeCpuThreshold, jobsPerNodeMemoryThreshold);
                     const newNodesRequired = Math.ceil(jobsThatAreCurrentlyUnhandled / jobsPerNode);
-                    console.log(`Rescaling cluster to size ${newNodesRequired + nodesUp + pending_nodes}!`)
+                    console.log(`Rescaling cluster to size ${newNodesRequired + nodesUp + pendingNodes}!`)
                     console.log(`Exepcted New Jobs ${expectedNewJobs}!`)
                     try {
                         await clusterManagerClient.setNodePoolSize({
                             nodePoolId: nodePoolName,
-                            nodeCount: newNodesRequired + nodesUp + pending_nodes,
+                            nodeCount: newNodesRequired + nodesUp + pendingNodes,
                             zone: 'us-central1-c',
                             projectId: "qpefcs-course-project",
                             clusterId: "flfk-cluster"
                         })
-                        pending_nodes = newNodesRequired + pending_nodes;
+                        pendingNodes = newNodesRequired + pendingNodes;
                     } catch (e) {
                         console.log("Can't rescale yet")
                     }
@@ -145,18 +142,37 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
             const earliestJob = _.min(allStartTimes);
             const latestJob = _.max(allStartTimes);
             const serviceTimeAvg = (_.sum(completedTimeDurations) / completedTimeDurations.length) / 1000;
-            const timeWindow = Math.min(serviceTimeAvg, (latestJob-earliestJob) / 1000);
+            const timeWindow = Math.min(serviceTimeAvg, (latestJob - earliestJob) / 1000);
             let maxArrivalRate = 0;
-            var table = [];
             for (let j = 0; j < (latestJob - earliestJob) / (timeWindow * 1000); j++) {
                 let filter = _.filter(allStartTimes, function (time) {
                     return new Date(earliestJob.getTime() + j * (timeWindow * 1000)) <= new Date(time) && new Date(time) <= new Date(earliestJob.getTime() + (j + 1) * (timeWindow * 1000));
                 });
-                table[j] = filter.length;
                 maxArrivalRate = Math.max(filter.length / timeWindow, maxArrivalRate);
             }
-            //calculate good estimate for service rate
-            //and provision accordingly
+            const jobsPerNodeCpuThreshold = Math.floor(availableNodeCpu / jobCpuSizeAvg);
+            const jobsPerNodeMemoryThreshold = Math.floor(availableNodeMemory / jobMemorySizeAvg);
+            const jobsPerNode = Math.min(jobsPerNodeCpuThreshold, jobsPerNodeMemoryThreshold);
+            const totalNodes = nodesUp + pendingNodes;
+            const jobsWeCanDoInParallel = jobsPerNode * totalNodes;
+            const expectedServiceRate = jobsWeCanDoInParallel * (1 / serviceTimeAvg);
+            const serviceRateRequired = maxArrivalRate / thresholdUtilization
+            if(serviceRateRequired > expectedServiceRate) {
+                const nodesRequiredForExpectedServiceRate = Math.ceil((serviceRateRequired * serviceTimeAvg) / jobsPerNode)
+                console.log(`Rescaling cluster to size ${nodesRequiredForExpectedServiceRate}!`)
+                try {
+                    await clusterManagerClient.setNodePoolSize({
+                        nodePoolId: nodePoolName,
+                        nodeCount: nodesRequiredForExpectedServiceRate,
+                        zone: 'us-central1-c',
+                        projectId: "qpefcs-course-project",
+                        clusterId: "flfk-cluster"
+                    })
+                    pendingNodes = nodesRequiredForExpectedServiceRate - nodesUp;
+                } catch (e) {
+                    console.log("Can't rescale yet")
+                }
+            }
         }
 
         _.forEach(utilInfoToLog, function indexToElasticsearch(utilInfo) {
