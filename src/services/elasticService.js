@@ -1,7 +1,7 @@
 import elasticsearch from 'elasticsearch';
 import crypto from "crypto";
 
-export const client = new elasticsearch.Client({ hosts: ['3.133.12.33:9200/'] });
+export const client = new elasticsearch.Client({ hosts: ['http://3.137.193.160:9200/'] });
 
 export async function createIndex(index) {
     let indexExists = await checkIfIndexExists(index);

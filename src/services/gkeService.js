@@ -3,8 +3,7 @@ import container from '@google-cloud/container';
 import {addDocumentWithoutId, createIndex} from "./elasticService";
 import k8s from '@kubernetes/client-node';
 
-const indexName = "gke-metric-data";
-const availableNodeCpu = 3.5;
+const availableNodeCpu = 3.9;
 const availableNodeMemory = 13000;
 const thresholdUtilization = 0.8;
 const nodePoolName = "pool-1";
@@ -13,7 +12,6 @@ var pendingNodes = 0;
 let realNodeUsage = {};
 
 export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
-    await createIndex(indexName)
     const projectId = 'qpefcs-course-project';
 
     const clusterManagerClient = new container.v1.ClusterManagerClient();
@@ -55,8 +53,8 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
             if (!jobNode in realNodeUsage)
                 pendingNodes = pendingNodes - 1;
             currentNodeUsage[jobNode] = {
-                "cpuUsed": (_.get(_.get(initialNodeUsage, "jobNode"), "cpuUsed") || 0) + parseInt(jobResources.cpu),
-                "memoryUsed": (_.get(_.get(initialNodeUsage, "jobNode"), "memoryUsed") || 0) + (parseInt(jobResources.memory.replace(/\D/g, '')) * 1024)
+                "cpuUsed": (_.get(_.get(initialNodeUsage, jobNode), "cpuUsed") || 0) + parseInt(jobResources.cpu),
+                "memoryUsed": (_.get(_.get(initialNodeUsage, jobNode), "memoryUsed") || 0) + (parseInt(jobResources.memory.replace(/\D/g, '')) * 1024)
             };
         });
 
@@ -72,7 +70,7 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
             return {
                 "node": node,
                 "metric": "utilization",
-                "value": Math.min(nodeValue["cpuUsed"] / availableNodeCpu, nodeValue["memoryUsed"] / availableNodeMemory),
+                "value": Math.max(nodeValue["cpuUsed"] / availableNodeCpu, nodeValue["memoryUsed"] / availableNodeMemory),
                 "@timestamp": Math.floor(new Date().getTime() / 1000)
             };
         })
@@ -103,10 +101,12 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
         //Ensure we meet threshold capacity
         if (completedJobs.length === 0) {
             if (pendingJobs.length + runningJobs.length > 0) {
-                const expectedNewJobs = runningJobs.length + pendingJobs.length;
+                const expectedNewJobs = runningJobs.length + 2 * (pendingJobs.length); //need to account for pending jobs that will be added to existing cluster
                 const jobsWeCanHandle = _.sum(_.map(currentNodeUsage, function (node) {
-                    const jobsThatCanBeHandledCpuThreshold = Math.floor((availableNodeCpu - node["cpuUsed"]) / jobCpuSizeAvg)
-                    const jobsThatCanBeHandledMemoryThreshold = Math.floor((availableNodeMemory - node["memoryUsed"]) / jobMemorySizeAvg)
+                    let remainingCpu = Math.max(availableNodeCpu - node["cpuUsed"], 0);
+                    const jobsThatCanBeHandledCpuThreshold = Math.floor(remainingCpu / jobCpuSizeAvg)
+                    let remainingMemory = Math.max(availableNodeMemory - node["memoryUsed"], 0);
+                    const jobsThatCanBeHandledMemoryThreshold = Math.floor(remainingMemory / jobMemorySizeAvg)
                     return Math.min(jobsThatCanBeHandledCpuThreshold, jobsThatCanBeHandledMemoryThreshold)
                 }));
 
@@ -144,11 +144,13 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
             const serviceTimeAvg = (_.sum(completedTimeDurations) / completedTimeDurations.length) / 1000;
             const timeWindow = Math.min(serviceTimeAvg, (latestJob - earliestJob) / 1000);
             let maxArrivalRate = 0;
+            let table = []
             for (let j = 0; j < (latestJob - earliestJob) / (timeWindow * 1000); j++) {
                 let filter = _.filter(allStartTimes, function (time) {
                     return new Date(earliestJob.getTime() + j * (timeWindow * 1000)) <= new Date(time) && new Date(time) <= new Date(earliestJob.getTime() + (j + 1) * (timeWindow * 1000));
                 });
-                maxArrivalRate = Math.max(filter.length / timeWindow, maxArrivalRate);
+                table[j] = filter;
+                    maxArrivalRate = Math.max(filter.length / timeWindow, maxArrivalRate);
             }
             const jobsPerNodeCpuThreshold = Math.floor(availableNodeCpu / jobCpuSizeAvg);
             const jobsPerNodeMemoryThreshold = Math.floor(availableNodeMemory / jobMemorySizeAvg);
@@ -157,7 +159,7 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
             const jobsWeCanDoInParallel = jobsPerNode * totalNodes;
             const expectedServiceRate = jobsWeCanDoInParallel * (1 / serviceTimeAvg);
             const serviceRateRequired = maxArrivalRate / thresholdUtilization
-            if(serviceRateRequired > expectedServiceRate) {
+            if (serviceRateRequired > expectedServiceRate) {
                 const nodesRequiredForExpectedServiceRate = Math.ceil((serviceRateRequired * serviceTimeAvg) / jobsPerNode)
                 console.log(`Rescaling cluster to size ${nodesRequiredForExpectedServiceRate}!`)
                 try {
@@ -174,9 +176,5 @@ export async function spawnNewNodeIfThresholdExceeded(initialNodeUsage) {
                 }
             }
         }
-
-        _.forEach(utilInfoToLog, function indexToElasticsearch(utilInfo) {
-            addDocumentWithoutId(indexName, utilInfo);
-        })
     }
 }
